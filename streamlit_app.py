@@ -91,7 +91,7 @@ if uploaded_file is not None:
                     if summary:
                         st.write(summary + "...")
                     else:
-                        st.write("_Preview unavailable for this case._")
+                        st.write("")
 
                     # Download button (only if file exists locally)
                     local_pdf = None
