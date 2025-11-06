@@ -1,0 +1,13 @@
+flask
+pymongo
+pinecone
+sentence-transformers
+faiss-cpu
+transformers
+datasets
+pysbd
+python-dotenv
+pdfplumber
+nltk
+tqdm
+gunicorn
