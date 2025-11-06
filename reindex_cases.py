@@ -1,28 +1,26 @@
 import os
 import time
-import pdfplumber
+import gzip
+import base64
+import concurrent.futures
+from tqdm import tqdm
+from dotenv import load_dotenv
 from pinecone import Pinecone
 from sentence_transformers import SentenceTransformer
-from dotenv import load_dotenv
+from PyPDF2 import PdfReader
 
-# =====================================
-# CONFIG
-# =====================================
+# ------------------------------
+# 1️⃣ Load Environment
+# ------------------------------
 load_dotenv()
-
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 INDEX_NAME = os.getenv("PINECONE_INDEX", "legal-cases")
 MODEL_NAME = os.getenv("MODEL_NAME", "all-MiniLM-L6-v2")
+UPLOADS_DIR = "uploads/filesssss"
 
-# ⚠️ Update this to the EXACT path where your PDFs are
-BASE_DIR = r"C:\Users\Lenovo\echo-legal-similarity\uploads\filesssss"
-
-CHUNK_LIMIT = 5000  # store only first 5000 chars in metadata
-BATCH_SIZE = 20     # how many files to upload to Pinecone per batch
-
-# =====================================
-# INIT CONNECTIONS
-# =====================================
+# ------------------------------
+# 2️⃣ Initialize Model + Pinecone
+# ------------------------------
 print("🔹 Connecting to Pinecone...")
 pc = Pinecone(api_key=PINECONE_API_KEY)
 index = pc.Index(INDEX_NAME)
@@ -30,78 +28,72 @@ index = pc.Index(INDEX_NAME)
 print("🔹 Loading model...")
 model = SentenceTransformer(MODEL_NAME)
 
-# =====================================
-# FUNCTIONS
-# =====================================
-def extract_text_pdf(pdf_path):
-    """Extract text from a PDF file using pdfplumber."""
+# ------------------------------
+# 3️⃣ Helper Functions
+# ------------------------------
+def extract_text_from_pdf(pdf_path):
     try:
-        text = ""
-        with pdfplumber.open(pdf_path) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text() or ""
-                text += page_text + "\n"
+        reader = PdfReader(pdf_path)
+        text = " ".join(page.extract_text() or "" for page in reader.pages)
         return text.strip()
-    except Exception as e:
-        print(f"❌ Error reading {pdf_path}: {e}")
+    except Exception:
         return ""
 
-# =====================================
-# MAIN INDEXING LOGIC
-# =====================================
-print(f"🚀 Starting full reindexing in folder: {os.path.abspath(BASE_DIR)}\n")
+def compress_text(text):
+    """Compress extracted text to save bandwidth."""
+    return base64.b64encode(gzip.compress(text.encode("utf-8"))).decode("utf-8")
 
-indexed = 0
-skipped = 0
-batch = []
-start_time = time.time()
+def process_pdf(pdf_path):
+    filename = os.path.basename(pdf_path)
+    doc_id = os.path.splitext(filename)[0]
+    text = extract_text_from_pdf(pdf_path)
+    if not text:
+        return None
+    vector = model.encode(text).tolist()
 
-# Debug: print every found file
-for root, _, files in os.walk(BASE_DIR):
-    for file in files:
-        if not file.lower().endswith(".pdf"):
-            continue
+    compressed_preview = compress_text(text[:3000])  # compress first 3k chars
+    metadata = {
+        "filename": filename,
+        "text_preview": compressed_preview,
+        "local_path": pdf_path.replace("\\", "/"),
+    }
+    return {"id": doc_id, "values": vector, "metadata": metadata}
 
-        pdf_path = os.path.join(root, file)
-        print(f"🔍 Found file: {pdf_path}")
+# ------------------------------
+# 4️⃣ Collect all PDFs
+# ------------------------------
+all_pdfs = []
+for root, _, files in os.walk(UPLOADS_DIR):
+    for f in files:
+        if f.lower().endswith(".pdf"):
+            all_pdfs.append(os.path.join(root, f))
+print(f"📁 Found {len(all_pdfs)} PDFs to index.")
 
-        text = extract_text_pdf(pdf_path)
+# ------------------------------
+# 5️⃣ Fast Multi-thread + Batching
+# ------------------------------
+start = time.time()
+batch_size = 100
+to_upsert, done, skipped = [], 0, 0
 
-        if not text or len(text.strip()) < 50:
-            print(f"⚠️ Skipped (no text): {file}")
+with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+    for record in tqdm(executor.map(process_pdf, all_pdfs), total=len(all_pdfs)):
+        if record:
+            to_upsert.append(record)
+            if len(to_upsert) >= batch_size:
+                index.upsert(vectors=to_upsert)
+                done += len(to_upsert)
+                to_upsert = []
+        else:
             skipped += 1
-            continue
 
-        try:
-            vector = model.encode(text).tolist()
-            doc_id = os.path.splitext(file)[0]
+if to_upsert:
+    index.upsert(vectors=to_upsert)
+    done += len(to_upsert)
 
-            batch.append({
-                "id": doc_id,
-                "values": vector,
-                "metadata": {"text": text[:CHUNK_LIMIT]}
-            })
-
-            if len(batch) >= BATCH_SIZE:
-                index.upsert(batch)
-                print(f"📤 Uploaded batch of {len(batch)} files to Pinecone...")
-                batch.clear()
-
-            print(f"✅ Ready to index: {file}")
-            indexed += 1
-
-        except Exception as e:
-            print(f"❌ Failed to index {file}: {e}")
-            skipped += 1
-
-# Upload remaining
-if batch:
-    index.upsert(batch)
-    print(f"📤 Uploaded final batch of {len(batch)} files to Pinecone...")
-
-elapsed = round(time.time() - start_time, 2)
+end = time.time()
 print("\n===============================")
-print(f"🎉 Reindexing completed in {elapsed} seconds.")
-print(f"✅ Indexed files: {indexed}")
+print(f"🎉 FAST Reindex completed in {end - start:.2f} sec")
+print(f"✅ Indexed: {done}")
 print(f"⚠️ Skipped (no text): {skipped}")
 print("===============================")

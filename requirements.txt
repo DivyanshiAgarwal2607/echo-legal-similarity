@@ -11,3 +11,11 @@ pdfplumber
 nltk
 tqdm
 gunicorn
+streamlit
+sentence-transformers==2.2.2
+PyPDF2
+python-dotenv
+tqdm
+torch>=2.1.0
+numpy<2
+PyPDF2
